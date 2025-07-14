@@ -1,0 +1,42 @@
+# Binaries for programs and plugins
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary, generated with 'go test -c'
+*.test
+
+# Output of the go coverage tool, 'go test -coverprofile'
+*.out
+
+# Dependency directories (remove the 'vendor/' if you're not using modules in vendor mode)
+vendor/
+
+# Go module cache (usually in GOPATH/pkg/mod, but can appear in project if modules aren't fully integrated)
+.cache/
+pkg/
+
+# Ignore VSCode/VSCodium settings and folders
+.vscode/
+.vscode-test/
+.history/
+
+# OS generated files
+.DS_Store       # macOS
+Thumbs.db       # Windows
+ehthumbs.db     # Windows
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Environment variables files (crucial for security)
+.env
+.env.*
+
+# Ignore .archive folder
+.archive/
+
+# Ignore built binary
+load-env
