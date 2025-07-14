@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	version = "0.1.0" // Current version of the tool
+	version = "0.2.0" // Current version of the tool
 
 	// DefaultConfigDir defines the default centralized directory for .env files.
 	// It's relative to the user's home directory (e.g., ~/.config/load-env).
@@ -34,6 +34,27 @@ type commandExecutor func(name string, arg ...string) *exec.Cmd
 // defaultCommandExecutor is the actual `os/exec.Command` function used in production.
 var defaultCommandExecutor commandExecutor = exec.Command
 
+// gopassRegex identifies `$(gopass show <path>)` patterns for specific handling.
+// It captures the path as the first group.
+var gopassRegex = regexp.MustCompile(`^\$\(gopass\ show\ (.*)\)$`)
+
+// genericCommandRegex identifies any `$(command args...)` pattern.
+// It captures the entire command string inside the parentheses as the first group.
+var genericCommandRegex = regexp.MustCompile(`^\$\((.+)\)$`)
+
+// executeCommandSubstitution runs a command string using the default shell
+// and returns its standard output.
+// It also directs the command's standard error to load-env's standard error.
+func executeCommandSubstitution(key, commandString, envFilePath string, lineNum int, cmdExecutor commandExecutor) (string, error) {
+	cmd := cmdExecutor(defaultShell, "-c", commandString)
+	cmd.Stderr = os.Stderr // Direct command's stderr to `load-env`'s stderr for visibility.
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("command '%s' for variable '%s' on line %d in '%s' failed: %w", commandString, key, lineNum, envFilePath, err)
+	}
+	return strings.TrimSuffix(string(output), "\n"), nil
+}
+
 // usage prints detailed usage information to stderr and exits the program
 // with a non-zero status, indicating an error or invalid invocation.
 func usage() {
@@ -46,7 +67,7 @@ func usage() {
 Description:
   Loads environment variables from <id>.env in the current directory, or if not found,
   from ~/.config/load-env/<id>.env (or the path in LOAD_ENV_CONFIG_DIR).
-  Supports variable expansion (e.g., FOO=$BAR or FOO=${BAR}) and gopass substitution.
+  Supports variable expansion (e.g., FOO=$BAR or FOO=${BAR}) and command substitution (e.g. $(gopass show ...)).
 
 Modes of Operation:
   1. load-env <id> <executable> [args...]
@@ -63,7 +84,7 @@ Modes of Operation:
      Variables WILL persist. Use with caution for sensitive data (visible via 'ps e').
 
   4. load-env --view <id>
-     Displays the resolved variables (including gopass secrets) that would be loaded.
+     Displays the resolved variables (including secrets from command substitutions) that would be loaded.
      WARNING: This will print plaintext secrets to your terminal. Use with caution.
      This mode does NOT launch a shell or run an executable; it only displays.
 
@@ -71,7 +92,8 @@ Environment File Format:
   (Looked for in current directory first, then in ~/.config/load-env/)
   KEY=VALUE
   # Comments are supported
-  DB_PASS=$(gopass show myproject/database/password)
+  DB_PASS=$(gopass show myproject/database/password) # Gopass specific example
+  AWS_REGION=$(aws configure get region)             # Generic command example
   APP_PORT=8080
   API_URL=http://localhost:$APP_PORT # Variable expansion example
   SECRET_MESSAGE="Hello \"world\""   # Double-quoted value with inner escapes
@@ -82,7 +104,7 @@ Environment File Format:
 }
 
 // parseEnvFile reads the .env file at the given path, processes each line
-// for key-value pairs, handles gopass command substitutions, unquotes values,
+// for key-value pairs, handles command substitutions, unquotes values,
 // and finally performs variable expansion. It returns a map of the fully
 // resolved environment variables that were *defined in the .env file*.
 func parseEnvFile(envFilePath string, cmdExecutor commandExecutor) (map[string]string, error) {
@@ -95,9 +117,6 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor) (map[string]s
 	initialEnvMap := make(map[string]string) // Stores parsed values before variable expansion.
 	scanner := bufio.NewScanner(file)
 	lineNum := 0
-
-	// gopassRegex identifies `$(gopass show <path>)` patterns for command substitution.
-	gopassRegex := regexp.MustCompile(`^\$\(gopass\ show\ (.*)\)$`)
 
 	for scanner.Scan() {
 		lineNum++
@@ -139,28 +158,39 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor) (map[string]s
 		}
 
 		// Handle literal dollar signs: Replace escaped "\$" with "$"
-		// This must happen after unquoting, but before gopass and variable expansion,
+		// This must happen after unquoting, but before command and variable expansion,
 		// so that `\$` is not misinterpreted as a variable.
 		value = strings.ReplaceAll(value, `\$`, `$`)
 
-		// Process gopass command substitution (e.g., `DB_PASS=$(gopass show path)`).
+		// --- Process Command Substitution ---
+		// 1. Try to match the specific gopass pattern first.
 		if matches := gopassRegex.FindStringSubmatch(value); len(matches) > 1 {
 			gopassPath := matches[1] // Extract the gopass path from the regex match.
-			// Execute `gopass show --password <path>`.
-			cmd := cmdExecutor("gopass", "show", "--password", gopassPath)
-			cmd.Stderr = os.Stderr // Direct gopass's stderr to `load-env`'s stderr for visibility.
-			gopassOutput, err := cmd.Output()
+			commandToExecute := fmt.Sprintf("gopass show --password %s", gopassPath)
+
+			output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor)
 			if err != nil {
-				// If gopass fails, log a warning and set the variable's value to empty.
-				fmt.Fprintf(os.Stderr, "load-env: Warning: gopass command for variable '%s' (path: '%s') failed on line %d in '%s'. Error: %v\n", key, gopassPath, lineNum, envFilePath, err)
-				fmt.Fprintln(os.Stderr, "  This usually means the secret does not exist or gopass encountered an error. Value set to empty.")
+				fmt.Fprintf(os.Stderr, "load-env: Warning: %v.\n", err)
+				fmt.Fprintln(os.Stderr, "  This usually means the gopass secret does not exist or gopass encountered an error. Value set to empty.")
 				value = ""
 			} else {
-				// On success, trim the trailing newline from gopass output.
-				value = strings.TrimSuffix(string(gopassOutput), "\n")
+				value = output
 				if value == "" {
-					// Warn if gopass returned an empty value.
 					fmt.Fprintf(os.Stderr, "load-env: Warning: gopass command for variable '%s' (path: '%s') returned an empty value on line %d in '%s'.\n", key, gopassPath, lineNum, envFilePath)
+				}
+			}
+		} else if matches := genericCommandRegex.FindStringSubmatch(value); len(matches) > 1 {
+			// 2. If not gopass, try the generic command substitution pattern.
+			commandToExecute := matches[1] // The entire command captured by the generic regex.
+
+			output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "load-env: Warning: %v. Value set to empty.\n", err)
+				value = ""
+			} else {
+				value = output
+				if value == "" {
+					fmt.Fprintf(os.Stderr, "load-env: Warning: command '%s' for variable '%s' returned an empty value on line %d in '%s'.\n", commandToExecute, key, lineNum, envFilePath)
 				}
 			}
 		}

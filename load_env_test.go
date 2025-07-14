@@ -13,6 +13,49 @@ import (
 	"time"
 )
 
+// mockGenericCommandExecutor creates a commandExecutor that can simulate
+// different outputs for different command lines.
+// `mockedResponses` is a map where the key is the full command line string
+// (e.g., "bash -c 'cd ~;echo `pwd`'") and the value contains the stdout,
+// stderr, and exit code for that specific command.
+func mockGenericCommandExecutor(mockedResponses map[string]struct {
+	stdout   string
+	stderr   string
+	exitCode int
+}) commandExecutor {
+	return func(name string, arg ...string) *exec.Cmd {
+		fullCmd := name + " " + strings.Join(arg, " ")
+		response, ok := mockedResponses[fullCmd]
+		if !ok {
+			// If command not explicitly mocked, default to empty output and failure.
+			// This helps identify unmocked commands during testing.
+			response = struct {
+				stdout   string
+				stderr   string
+				exitCode int
+			}{"", fmt.Sprintf("Error: Unmocked command called: %s", fullCmd), 1}
+		}
+
+		// Create a unique temporary file path for the mock script.
+		mockScriptPath := filepath.Join(os.TempDir(), fmt.Sprintf("mock-cmd-%d-%d.sh", os.Getpid(), time.Now().UnixNano()))
+
+		scriptContent := fmt.Sprintf(`#!/bin/bash
+printf "%%s" "%s" # Print mock stdout to stdout
+printf "%%s" "%s" >&2 # Print mock stderr to stderr
+exit %d
+`, response.stdout, response.stderr, response.exitCode)
+
+		err := ioutil.WriteFile(mockScriptPath, []byte(scriptContent), 0755)
+		if err != nil {
+			panic(fmt.Sprintf("Failed to create mock script at %s: %v", mockScriptPath, err))
+		}
+
+		cmd := exec.Command(mockScriptPath, arg...) // Pass original args to the mock script
+		cmd.Stderr = os.Stderr // For debugging mock script execution issues
+		return cmd
+	}
+}
+
 // mockCommand creates a mock commandExecutor.
 // It returns a function that, when called, creates an `exec.Cmd` pointing to a temporary
 // executable script. This script is designed to print the specified `stdout` and `stderr`
@@ -59,10 +102,45 @@ func TestParseEnvFile(t *testing.T) {
 		envContent    string // Content to write to the temporary .env file
 		mockGopassOut string // Expected stdout from mock gopass call
 		mockGopassErr bool   // Whether mock gopass should return an error
+		mockedGenericCmds map[string]struct{stdout string; stderr string; exitCode int} // For generic command mocking
 		expectedMap   map[string]string // The expected final map of environment variables
 		expectedError bool // Whether parseEnvFile itself is expected to return an error
 		expectWarning bool // Whether a warning is expected to be printed to stderr
 	}{
+		{
+			name:        "Generic Command Execution (pwd)",
+			// Corrected envContent to be a double-quoted string with escaped backticks
+			envContent:  "mydir=$(cd ~;echo \\`pwd\\`)",
+			mockGopassOut: "", // Not used for this test case
+			mockGopassErr: false, // Not used for this test case
+			// Corrected mockedGenericCmds key based on actual executed command
+			mockedGenericCmds: map[string]struct{stdout string; stderr string; exitCode int}{"bash -c cd ~;echo \\`pwd\\`": {stdout: "/home/myuser", stderr: "", exitCode: 0}},
+			expectedMap: map[string]string{"mydir": "/home/myuser"},
+		},
+		{
+			name:        "Generic Command Returns Empty",
+			envContent:  "EMPTY_CMD=$(echo -n)",
+			// Corrected mockedGenericCmds key
+			mockedGenericCmds: map[string]struct{stdout string; stderr string; exitCode int}{"bash -c echo -n": {stdout: "", stderr: "", exitCode: 0}},
+			expectedMap: map[string]string{"EMPTY_CMD": ""},
+			expectWarning: true, // Expect a warning about empty command output
+		},
+		{
+			name:        "Generic Command Error",
+			envContent:  "FAILED_CMD=$(exit 1)",
+			// Corrected mockedGenericCmds key
+			mockedGenericCmds: map[string]struct{stdout string; stderr string; exitCode int}{"bash -c exit 1": {stdout: "", stderr: "mock command error", exitCode: 1}},
+			expectedMap: map[string]string{"FAILED_CMD": ""}, // Should default to empty string on command error
+			expectWarning: true, // Expect warning from command failure
+		},
+		{
+			name:        "Mixed Generic Command and Variable Expansion",
+			// envContent was already corrected in previous turn
+			envContent: "MY_PATH=$(cd ~;echo \\`pwd\\`)\nFULL_PATH=The path is $MY_PATH",
+			// Corrected mockedGenericCmds key based on actual executed command
+			mockedGenericCmds: map[string]struct{stdout string; stderr string; exitCode int}{"bash -c cd ~;echo \\`pwd\\`": {stdout: "/home/myuser", stderr: "", exitCode: 0}},
+			expectedMap: map[string]string{"MY_PATH": "/home/myuser", "FULL_PATH": "The path is /home/myuser"},
+		},
 		{
 			name:        "Basic Key-Value Pairs",
 			envContent:  "KEY1=VALUE1\nKEY2=VALUE2",
@@ -89,9 +167,9 @@ KEY5="Value with mixed\t tabs and\r carriage returns"`,
 			},
 		},
 		{
-			name:        "Malformed Quoted Value (Unquote Error fallback)",
-			envContent:  `MALFORMED_QUOTE="Unclosed quote`, // strconv.Unquote will not be called for malformed double quotes
-			expectedMap: map[string]string{"MALFORMED_QUOTE": `"Unclosed quote`}, // Stays as is, no unquoting or stripping if not properly delimited
+			name:          "Malformed Quoted Value (Unquote Error fallback)",
+			envContent:    `MALFORMED_QUOTE="Unclosed quote`, // strconv.Unquote will not be called for malformed double quotes
+			expectedMap:   map[string]string{"MALFORMED_QUOTE": `"Unclosed quote`}, // Stays as is, no unquoting or stripping if not properly delimited
 			expectWarning: false, // No warning from strconv.Unquote if it's not even attempted
 		},
 		{
@@ -236,7 +314,9 @@ FINAL_VAR=${VAR_WITH_SPACE}_END`, // Corrected to use curly braces for concatena
 
 			// Create a mock command executor tailored for this test case's gopass behavior
 			var mockCmdExecutor commandExecutor
-			if tt.mockGopassErr {
+			if len(tt.mockedGenericCmds) > 0 {
+				mockCmdExecutor = mockGenericCommandExecutor(tt.mockedGenericCmds)
+			} else if tt.mockGopassErr {
 				// If gopass error is expected, set up the mock to return an error (exit code 1)
 				mockCmdExecutor = mockCommand("", "mock gopass error", 1)
 			} else {

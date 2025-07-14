@@ -22,6 +22,7 @@ load-env myconfig kopia <params>
 - **Smart Value Handling**: Supports both double-quoted values (with full escape sequence support like `\n`, `\"`) and literal single-quoted values.
 - **Robust Variable Expansion**: Resolve `$VAR` and `${VAR}` references within your `.env` file. It handles recursive expansions and prevents infinite loops from circular dependencies, resolving unresolvable variables to empty strings with a warning.
 - **Seamless Gopass Integration**: Directly inject secrets from your `gopass` store using `$(gopass show <path>)` syntax, keeping sensitive data out of plain text.
+- **Command Substitution**: Execute shell commands and use their standard output as variable values using `$(command args)`. This works for any command, e.g. `MY_VAR=$(echo "hello")`, `DB_PASS=$(gopass show my/db/pass)`.
 - **Flexible Execution Modes**:
 
   - **Execute a Command**: Load variables and run a specified executable with its arguments, with the environment isolated to that process.
