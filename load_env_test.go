@@ -24,6 +24,7 @@ func mockGenericCommandExecutor(mockedResponses map[string]struct {
 	exitCode int
 }) commandExecutor {
 	return func(name string, arg ...string) *exec.Cmd {
+		// `name` will be "bash", `arg` will be `["-c", "<command-string-from-env-file>"]`
 		fullCmd := name + " " + strings.Join(arg, " ")
 		response, ok := mockedResponses[fullCmd]
 		if !ok {
@@ -51,7 +52,7 @@ exit %d
 		}
 
 		cmd := exec.Command(mockScriptPath, arg...) // Pass original args to the mock script
-		cmd.Stderr = os.Stderr // For debugging mock script execution issues
+		cmd.Stderr = os.Stderr                      // For debugging mock script execution issues
 		return cmd
 	}
 }
@@ -98,47 +99,64 @@ exit %d
 // TestParseEnvFile is a comprehensive test suite for the `parseEnvFile` function.
 func TestParseEnvFile(t *testing.T) {
 	tests := []struct {
-		name          string // Name of the test case
-		envContent    string // Content to write to the temporary .env file
-		mockGopassOut string // Expected stdout from mock gopass call
-		mockGopassErr bool   // Whether mock gopass should return an error
-		mockedGenericCmds map[string]struct{stdout string; stderr string; exitCode int} // For generic command mocking
+		name              string // Name of the test case
+		envContent        string // Content to write to the temporary .env file
+		mockGopassOut     string // Expected stdout from mock gopass call
+		mockGopassErr     bool   // Whether mock gopass should return an error
+		mockedGenericCmds map[string]struct {
+			stdout   string
+			stderr   string
+			exitCode int
+		} // For generic command mocking
 		expectedMap   map[string]string // The expected final map of environment variables
-		expectedError bool // Whether parseEnvFile itself is expected to return an error
-		expectWarning bool // Whether a warning is expected to be printed to stderr
+		expectedError bool              // Whether parseEnvFile itself is expected to return an error
+		expectWarning bool              // Whether a warning is expected to be printed to stderr
+		// For tests where system environment variables are relevant for command execution
+		// This map will be added to the os.Environ() during mockCommandExecutor setup
+		mockSystemEnv map[string]string
 	}{
 		{
-			name:        "Generic Command Execution (pwd)",
-			// Corrected envContent to be a double-quoted string with escaped backticks
-			envContent:  "mydir=$(cd ~;echo \\`pwd\\`)",
-			mockGopassOut: "", // Not used for this test case
-			mockGopassErr: false, // Not used for this test case
-			// Corrected mockedGenericCmds key based on actual executed command
-			mockedGenericCmds: map[string]struct{stdout string; stderr string; exitCode int}{"bash -c cd ~;echo \\`pwd\\`": {stdout: "/home/myuser", stderr: "", exitCode: 0}},
+			name:       "Generic Command Execution (pwd)",
+			envContent: "mydir=$(cd ~;echo `pwd`)",
+			mockedGenericCmds: map[string]struct {
+				stdout   string
+				stderr   string
+				exitCode int
+			}{"bash -c cd ~;echo `pwd`": {stdout: "/home/myuser", stderr: "", exitCode: 0}},
 			expectedMap: map[string]string{"mydir": "/home/myuser"},
 		},
 		{
-			name:        "Generic Command Returns Empty",
-			envContent:  "EMPTY_CMD=$(echo -n)",
-			// Corrected mockedGenericCmds key
-			mockedGenericCmds: map[string]struct{stdout string; stderr string; exitCode int}{"bash -c echo -n": {stdout: "", stderr: "", exitCode: 0}},
-			expectedMap: map[string]string{"EMPTY_CMD": ""},
+			name:       "Generic Command Returns Empty",
+			envContent: "EMPTY_CMD=$(echo -n)",
+			mockedGenericCmds: map[string]struct {
+				stdout   string
+				stderr   string
+				exitCode int
+			}{"bash -c echo -n": {stdout: "", stderr: "", exitCode: 0}},
+			expectedMap:   map[string]string{"EMPTY_CMD": ""},
 			expectWarning: true, // Expect a warning about empty command output
 		},
 		{
-			name:        "Generic Command Error",
-			envContent:  "FAILED_CMD=$(exit 1)",
-			// Corrected mockedGenericCmds key
-			mockedGenericCmds: map[string]struct{stdout string; stderr string; exitCode int}{"bash -c exit 1": {stdout: "", stderr: "mock command error", exitCode: 1}},
-			expectedMap: map[string]string{"FAILED_CMD": ""}, // Should default to empty string on command error
-			expectWarning: true, // Expect warning from command failure
+			name:       "Generic Command Error",
+			envContent: "FAILED_CMD=$(exit 1)",
+			mockedGenericCmds: map[string]struct {
+				stdout   string
+				stderr   string
+				exitCode int
+			}{"bash -c exit 1": {stdout: "", stderr: "mock command error", exitCode: 1}},
+			expectedMap:   map[string]string{"FAILED_CMD": ""}, // Should default to empty string on command error
+			expectWarning: true,                                // Expect warning from command failure
 		},
 		{
-			name:        "Mixed Generic Command and Variable Expansion",
-			// envContent was already corrected in previous turn
-			envContent: "MY_PATH=$(cd ~;echo \\`pwd\\`)\nFULL_PATH=The path is $MY_PATH",
-			// Corrected mockedGenericCmds key based on actual executed command
-			mockedGenericCmds: map[string]struct{stdout string; stderr string; exitCode int}{"bash -c cd ~;echo \\`pwd\\`": {stdout: "/home/myuser", stderr: "", exitCode: 0}},
+			name:       "Mixed Generic Command and Variable Expansion",
+			envContent: "MY_PATH=$(cd ~;echo `pwd`)\nFULL_PATH=The path is $MY_PATH",
+			mockedGenericCmds: map[string]struct {
+				stdout   string
+				stderr   string
+				exitCode int
+			}{
+				"bash -c cd ~;echo `pwd`": {stdout: "/home/myuser", stderr: "", exitCode: 0},
+			},
 			expectedMap: map[string]string{"MY_PATH": "/home/myuser", "FULL_PATH": "The path is /home/myuser"},
 		},
 		{
@@ -152,7 +170,7 @@ func TestParseEnvFile(t *testing.T) {
 			expectedMap: map[string]string{"KEY1": "VALUE1", "KEY2": "VALUE2"},
 		},
 		{
-			name:        "Quoted Values and Inner Escapes (strconv.Unquote functionality)",
+			name: `Quoted Values and Inner Escapes (strconv.Unquote functionality)`,
 			envContent: `KEY1="VALUE WITH SPACES"
 KEY2='ANOTHER VALUE'
 KEY3="Value with \"inner quotes\" and \n newline escape"
@@ -162,15 +180,15 @@ KEY5="Value with mixed\t tabs and\r carriage returns"`,
 				"KEY1": "VALUE WITH SPACES",
 				"KEY2": "ANOTHER VALUE",
 				"KEY3": "Value with \"inner quotes\" and \n newline escape",
-				"KEY4": "Value with \\'single inner quotes\\'", // Corrected expected: single quotes are literal for inner escapes
+				"KEY4": "Value with \\'single inner quotes\\'",
 				"KEY5": "Value with mixed\t tabs and\r carriage returns",
 			},
 		},
 		{
-			name:          "Malformed Quoted Value (Unquote Error fallback)",
-			envContent:    `MALFORMED_QUOTE="Unclosed quote`, // strconv.Unquote will not be called for malformed double quotes
-			expectedMap:   map[string]string{"MALFORMED_QUOTE": `"Unclosed quote`}, // Stays as is, no unquoting or stripping if not properly delimited
-			expectWarning: false, // No warning from strconv.Unquote if it's not even attempted
+			name:        "Malformed Quoted Value (Unquote Error fallback)",
+			envContent:  `MALFORMED_QUOTE="Unclosed quote`,                       // strconv.Unquote will not be called for malformed double quotes
+			expectedMap: map[string]string{"MALFORMED_QUOTE": `"Unclosed quote`}, // Stays as is, no unquoting or stripping if not properly delimited
+			//expectWarning: false, // No warning from strconv.Unquote if it's not even attempted -- this was correct
 		},
 		{
 			name:          "Gopass Success",
@@ -189,9 +207,9 @@ KEY5="Value with mixed\t tabs and\r carriage returns"`,
 			name:          "Gopass Error",
 			envContent:    `FAILED_SECRET=$(gopass show non/existent/secret)`,
 			mockGopassOut: "",
-			mockGopassErr: true, // Simulate gopass command returning an error
+			mockGopassErr: true,                                   // Simulate gopass command returning an error
 			expectedMap:   map[string]string{"FAILED_SECRET": ""}, // Should default to empty string on gopass error
-			expectWarning: true, // Expect warning from gopass failure
+			expectWarning: true,                                   // Expect warning from gopass failure
 		},
 		{
 			name:          "Mixed Gopass and Regular Variables",
@@ -211,33 +229,33 @@ KEY5="Value with mixed\t tabs and\r carriage returns"`,
 			expectWarning: true, // Expect warning for "JUST_A_KEY"
 		},
 		{
-			name:        "Simple Variable Expansion ($VAR)",
+			name: "Simple Variable Expansion ($VAR)",
 			envContent: `VAR1=hello
 VAR2=$VAR1 world`,
 			expectedMap: map[string]string{"VAR1": "hello", "VAR2": "hello world"},
 		},
 		{
-			name:        "Curly Brace Variable Expansion (${VAR})",
+			name: "Curly Brace Variable Expansion (${VAR})",
 			envContent: `BASE_URL=http://localhost
 PORT=8080
 FULL_URL=${BASE_URL}:${PORT}/api`,
 			expectedMap: map[string]string{"BASE_URL": "http://localhost", "PORT": "8080", "FULL_URL": "http://localhost:8080/api"},
 		},
 		{
-			name:        "Mixed Expansion Styles",
+			name: "Mixed Expansion Styles",
 			envContent: `FOO=foo
 BAR=${FOO}bar
 BAZ=$BAR-baz`,
 			expectedMap: map[string]string{"FOO": "foo", "BAR": "foobar", "BAZ": "foobar-baz"},
 		},
 		{
-			name:        "Undefined Variable Expansion (expands to empty)",
+			name: "Undefined Variable Expansion (expands to empty)",
 			envContent: `HELLO=world
 GREETING=$UNDEFINED_VAR HELLO ${ANOTHER_UNDEFINED} `,
 			expectedMap: map[string]string{"HELLO": "world", "GREETING": " HELLO "}, // Corrected expected value
 		},
 		{
-			name:        "Expansion with Gopass Value",
+			name: "Expansion with Gopass Value",
 			envContent: `APP_SECRET=$(gopass show my/app/secret)
 APP_CONFIG=Secret is: $APP_SECRET`,
 			mockGopassOut: "my-resolved-secret",
@@ -254,7 +272,7 @@ APP_CONFIG=Secret is: $APP_SECRET`,
 			expectedMap: map[string]string{"COST": "$100.00"},
 		},
 		{
-			name:        "Recursive Expansion (within limit)",
+			name: "Recursive Expansion (within limit)",
 			envContent: `A=$B
 B=$C
 C=$D
@@ -262,24 +280,103 @@ D=FINAL`,
 			expectedMap: map[string]string{"A": "FINAL", "B": "FINAL", "C": "FINAL", "D": "FINAL"},
 		},
 		{
-			name:        "Circular Dependency (should warn and result in empty strings)",
+			name: "Circular Dependency (should warn and result in empty strings)",
 			envContent: `X=$Y
 Y=$Z
 Z=$X`, // This cycle will trigger the expansion warning
 			expectedMap:   map[string]string{"X": "", "Y": "", "Z": ""}, // Should resolve to empty
-			expectWarning: true, // Expect warning about expansion not stabilizing
+			expectWarning: true,                                         // Expect warning about expansion not stabilizing
 		},
 		{
-			name:        "Variable references itself (should resolve to empty)",
-			envContent: `MY_VAR=$MY_VAR`,
-			expectedMap: map[string]string{"MY_VAR": ""}, // Should resolve to empty
-			expectWarning: true, // Expect warning about expansion not stabilizing
+			name:          "Variable references itself (should resolve to empty)",
+			envContent:    `MY_VAR=$MY_VAR`,
+			expectedMap:   map[string]string{"MY_VAR": ""}, // Should resolve to empty
+			expectWarning: true,                            // Expect warning about expansion not stabilizing
 		},
 		{
-			name:        "Expansion with unquoted spaces in referenced variable (correct syntax)",
+			name: "Expansion with unquoted spaces in referenced variable (correct syntax)",
 			envContent: `VAR_WITH_SPACE=hello world
 FINAL_VAR=${VAR_WITH_SPACE}_END`, // Corrected to use curly braces for concatenation
 			expectedMap: map[string]string{"VAR_WITH_SPACE": "hello world", "FINAL_VAR": "hello world_END"},
+		},
+		// --- NEW TEST CASES FOR COMMAND SUBSTITUTION CHAINING (FIXED MOCK KEYS) ---
+		{
+			name:       "Cmd Sub: Referencing Preceding Variable",
+			envContent: "PRE_VAR=hello\nCMD_RESULT=$(echo $PRE_VAR world)",
+			mockedGenericCmds: map[string]struct {
+				stdout   string
+				stderr   string
+				exitCode int
+			}{
+				// The key here is the exact command string passed to "bash -c"
+				"bash -c echo $PRE_VAR world": {stdout: "hello world", stderr: "", exitCode: 0},
+			},
+			expectedMap: map[string]string{"PRE_VAR": "hello", "CMD_RESULT": "hello world"},
+		},
+		{
+			name:       "Cmd Sub: Referencing Preceding Variable with Expansion",
+			envContent: "BASE_MSG=Start\nFULL_MSG=${BASE_MSG}_Middle\nFINAL_CMD=$(echo $FULL_MSG_End)",
+			mockedGenericCmds: map[string]struct {
+				stdout   string
+				stderr   string
+				exitCode int
+			}{
+				// The command string includes the unexpanded variable name, bash will expand it.
+				"bash -c echo $FULL_MSG_End": {stdout: "Start_Middle_End", stderr: "", exitCode: 0},
+			},
+			expectedMap: map[string]string{"BASE_MSG": "Start", "FULL_MSG": "Start_Middle", "FINAL_CMD": "Start_Middle_End"},
+		},
+		{
+			name:          "Cmd Sub: Overriding System Var for Cmd Sub",
+			envContent:    "PATH=/new/path/bin\nCMD_ENV_PATH=$(echo $PATH)",
+			mockSystemEnv: map[string]string{"PATH": "/old/path/bin"}, // System PATH will be overridden by .env's PATH for the sub-command
+			mockedGenericCmds: map[string]struct {
+				stdout   string
+				stderr   string
+				exitCode int
+			}{
+				"bash -c echo $PATH": {stdout: "/new/path/bin", stderr: "", exitCode: 0}, // Mock should return the overridden value
+			},
+			expectedMap: map[string]string{"PATH": "/new/path/bin", "CMD_ENV_PATH": "/new/path/bin"},
+		},
+		{
+			name: "Cmd Sub: Complex Chaining within Env File",
+			envContent: `ROOT_DIR=/opt/app
+BIN_DIR=$(echo $ROOT_DIR/bin)
+CONFIG_PATH=$(echo $BIN_DIR/config.yaml)`,
+			mockedGenericCmds: map[string]struct {
+				stdout   string
+				stderr   string
+				exitCode int
+			}{
+				"bash -c echo $ROOT_DIR/bin":        {stdout: "/opt/app/bin", stderr: "", exitCode: 0},
+				"bash -c echo $BIN_DIR/config.yaml": {stdout: "/opt/app/bin/config.yaml", stderr: "", exitCode: 0},
+			},
+			expectedMap: map[string]string{
+				"ROOT_DIR":    "/opt/app",
+				"BIN_DIR":     "/opt/app/bin",
+				"CONFIG_PATH": "/opt/app/bin/config.yaml",
+			},
+		},
+		{
+			name: "Cmd Sub: Mixed Gopass and Env Var in Cmd",
+			envContent: `SECRET_ID=my/service/secret
+DB_PASSWORD=$(gopass show $SECRET_ID)`,
+			// The `gopass show` command will be executed by bash, with $SECRET_ID expanded by bash.
+			// The `gopassRegex` matches `$(gopass show <path>)`. The <path> is what is sent as `commandToExecute` to `executeCommandSubstitution`
+			// then it constructs `gopass show --password <path>`.
+			// So, the mock key should be exactly `bash -c gopass show --password $SECRET_ID`
+			mockedGenericCmds: map[string]struct {
+				stdout   string
+				stderr   string
+				exitCode int
+			}{
+				"bash -c gopass show --password $SECRET_ID": {stdout: "actual-db-pass", stderr: "", exitCode: 0},
+			},
+			expectedMap: map[string]string{
+				"SECRET_ID":   "my/service/secret",
+				"DB_PASSWORD": "actual-db-pass",
+			},
 		},
 	}
 
@@ -299,6 +396,29 @@ FINAL_VAR=${VAR_WITH_SPACE}_END`, // Corrected to use curly braces for concatena
 				t.Fatalf("Failed to write to temp file: %v", err)
 			}
 			tempFile.Close() // Close the file handle
+
+			// --- Set up mock system environment if provided ---
+			originalEnviron := os.Environ() // Save original environment
+			if tt.mockSystemEnv != nil {
+				newEnv := []string{}
+				for k, v := range tt.mockSystemEnv {
+					newEnv = append(newEnv, fmt.Sprintf("%s=%s", k, v))
+				}
+				os.Clearenv() // Clear existing env
+				for _, kv := range newEnv {
+					os.Setenv(strings.SplitN(kv, "=", 2)[0], strings.SplitN(kv, "=", 2)[1])
+				}
+			}
+			// Restore original environment after the test
+			defer func() {
+				os.Clearenv()
+				for _, kv := range originalEnviron {
+					parts := strings.SplitN(kv, "=", 2)
+					if len(parts) == 2 {
+						os.Setenv(parts[0], parts[1])
+					}
+				}
+			}()
 
 			// --- Capture Stderr for warning checks ---
 			oldStderr := os.Stderr

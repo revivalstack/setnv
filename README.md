@@ -147,4 +147,4 @@ We strive to create a welcoming and inclusive community. Please be respectful an
 
 ## License
 
-`load-env` is released under the [MIT License](https://www.google.com/search?q=LICENSE).
+`load-env` is released under the [MIT License](https://github.com/revivalstack/load-env/blob/main/LICENSE).

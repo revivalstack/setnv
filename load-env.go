@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	version = "0.2.0" // Current version of the tool
+	version = "0.3.0" // Current version of the tool
 
 	// DefaultConfigDir defines the default centralized directory for .env files.
 	// It's relative to the user's home directory (e.g., ~/.config/load-env).
@@ -45,12 +45,47 @@ var genericCommandRegex = regexp.MustCompile(`^\$\((.+)\)$`)
 // executeCommandSubstitution runs a command string using the default shell
 // and returns its standard output.
 // It also directs the command's standard error to load-env's standard error.
-func executeCommandSubstitution(key, commandString, envFilePath string, lineNum int, cmdExecutor commandExecutor) (string, error) {
+func executeCommandSubstitution(key, commandString, envFilePath string, lineNum int, cmdExecutor commandExecutor, currentEnvMap map[string]string) (string, error) {
 	cmd := cmdExecutor(defaultShell, "-c", commandString)
 	cmd.Stderr = os.Stderr // Direct command's stderr to `load-env`'s stderr for visibility.
+
+	// --- START NEW/MODIFIED LOGIC ---
+	// Build the environment for the sub-command.
+	// It should inherit the original process environment and then overlay
+	// the variables parsed from the .env file so far (currentEnvMap).
+	subCmdEnvMap := make(map[string]string)
+
+	// 1. Start with load-env's inherited environment (its parent's env)
+	for _, envVar := range os.Environ() {
+		parts := strings.SplitN(envVar, "=", 2)
+		if len(parts) == 2 {
+			subCmdEnvMap[parts[0]] = parts[1]
+		}
+	}
+
+	// 2. Overlay with variables parsed from the .env file up to this point
+	//    This allows command substitutions to see variables defined on preceding lines.
+	for k, v := range currentEnvMap {
+		subCmdEnvMap[k] = v // .env variables take precedence
+	}
+
+	// Convert the map to a slice of "KEY=VALUE" strings for cmd.Env
+	var subCmdEnvSlice []string
+	for k, v := range subCmdEnvMap {
+		subCmdEnvSlice = append(subCmdEnvSlice, fmt.Sprintf("%s=%s", k, v))
+	}
+	sort.Strings(subCmdEnvSlice) // Sort for consistent order, though not strictly required by os/exec.
+
+	cmd.Env = subCmdEnvSlice
+	// --- END NEW/MODIFIED LOGIC ---
+
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("command '%s' for variable '%s' on line %d in '%s' failed: %w", commandString, key, lineNum, envFilePath, err)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			// Include stderr output from the failed command in the error message
+			return "", fmt.Errorf("command '%s' for variable '%s' on line %d in '%s' failed with exit code %d: %s", commandString, key, lineNum, envFilePath, exitErr.ExitCode(), string(exitErr.Stderr))
+		}
+		return "", fmt.Errorf("failed to execute command substitution for variable '%s' on line %d in '%s': %w", key, lineNum, envFilePath, err)
 	}
 	return strings.TrimSuffix(string(output), "\n"), nil
 }
@@ -162,13 +197,33 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor) (map[string]s
 		// so that `\$` is not misinterpreted as a variable.
 		value = strings.ReplaceAll(value, `\$`, `$`)
 
+		// Prepare the combined environment map for variable lookup during command substitution.
+		// This map combines system environment variables with those initially parsed
+		// from the .env file *so far*. Variables from the .env file will take precedence
+		// during lookup if their keys conflict with existing system variables.
+		combinedEnvForLookup := make(map[string]string)
+		for _, envVar := range os.Environ() { // Start with current system environment
+			parts := strings.SplitN(envVar, "=", 2)
+			if len(parts) == 2 {
+				combinedEnvForLookup[parts[0]] = parts[1]
+			}
+		}
+		// Variables parsed directly from the .env file (up to this point) override system variables for lookup.
+		// This ensures that an .env variable can refer to another .env variable,
+		// or override an existing system variable and then be referenced.
+		for k, v := range initialEnvMap {
+			combinedEnvForLookup[k] = v
+		}
+
 		// --- Process Command Substitution ---
 		// 1. Try to match the specific gopass pattern first.
 		if matches := gopassRegex.FindStringSubmatch(value); len(matches) > 1 {
 			gopassPath := matches[1] // Extract the gopass path from the regex match.
 			commandToExecute := fmt.Sprintf("gopass show --password %s", gopassPath)
 
-			output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor)
+			// --- MODIFIED CALL ---
+			output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor, combinedEnvForLookup) // Pass the current environment map
+			// --- END MODIFIED CALL ---
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "load-env: Warning: %v.\n", err)
 				fmt.Fprintln(os.Stderr, "  This usually means the gopass secret does not exist or gopass encountered an error. Value set to empty.")
@@ -183,7 +238,9 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor) (map[string]s
 			// 2. If not gopass, try the generic command substitution pattern.
 			commandToExecute := matches[1] // The entire command captured by the generic regex.
 
-			output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor)
+			// --- MODIFIED CALL ---
+			output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor, combinedEnvForLookup) // Pass the current environment map
+			// --- END MODIFIED CALL ---
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "load-env: Warning: %v. Value set to empty.\n", err)
 				value = ""
@@ -207,6 +264,8 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor) (map[string]s
 	// This map combines system environment variables with those initially parsed
 	// from the .env file. Variables from the .env file will take precedence
 	// during lookup if their keys conflict with existing system variables.
+	// This map is regenerated here to ensure it includes *all* initialEnvMap entries
+	// after command substitutions are processed for the entire file.
 	combinedEnvForLookup := make(map[string]string)
 	for _, envVar := range os.Environ() { // Start with current system environment
 		parts := strings.SplitN(envVar, "=", 2)
@@ -248,7 +307,7 @@ func expandVariables(varsToExpand map[string]string, baseEnv map[string]string) 
 	// currentLookupEnv will be used for looking up variable values during expansion.
 	// It starts with the baseEnv (current shell + .env's initial values)
 	// and gets updated with `expandedVars` as they resolve.
-	currentLookupEnv := make(map[string]string, len(baseEnv) + len(expandedVars))
+	currentLookupEnv := make(map[string]string, len(baseEnv)+len(expandedVars))
 	for k, v := range baseEnv {
 		currentLookupEnv[k] = v
 	}
@@ -346,10 +405,10 @@ func main() {
 	args := os.Args[1:] // Get command-line arguments, excluding the program name itself.
 
 	var (
-		viewMode   bool   // Flag for `--view` mode.
-		exportMode bool   // Flag for `--export` mode.
-		id         string // Identifier for the .env file (e.g., "myproject").
-		executable string // The executable to run in default mode.
+		viewMode   bool     // Flag for `--view` mode.
+		exportMode bool     // Flag for `--export` mode.
+		id         string   // Identifier for the .env file (e.g., "myproject").
+		executable string   // The executable to run in default mode.
 		execArgs   []string // Arguments for the executable.
 	)
 
