@@ -1,3 +1,9 @@
+## v0.4.0 (2025-07-16)
+
+### Feat
+
+- add chained .env file support and --sandboxed mode
+
 ## v0.3.0 (2025-07-16)
 
 ### Feat
