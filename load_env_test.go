@@ -445,7 +445,7 @@ DB_PASSWORD=$(gopass show $SECRET_ID)`,
 			}
 
 			// Call the `parseEnvFile` function under test
-			actualMap, err := parseEnvFile(tempFile.Name(), mockCmdExecutor)
+			actualMap, err := parseEnvFile(tempFile.Name(), mockCmdExecutor, make(map[string]string))
 
 			// Close the write end of the pipe immediately after `parseEnvFile` returns,
 			// so that `ioutil.ReadAll` on the read end gets EOF.

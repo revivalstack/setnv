@@ -2,22 +2,33 @@
 
 > Effortless environment variable loading and management for any workflow.
 
-Manage your application's environment variables with simplicity and power. `load-env` helps you centralize configuration and sensitive data in easy-to-use `.env` files, supporting dynamic variable expansion and seamless secret integration.
+Manage your application's environment variables with simplicity and power. `load-env` helps you centralize configuration and sensitive data in easy-to-use `.env` files, supporting dynamic variable expansion and seamless secret integration. It also supports chaining multiple `.env` files, allowing for layered configurations.
 
 ## Quick Example
 
 Store your kopia environment variables in a `myconfig.env` file, and use `load-env` to call kopia with the resolved environment variables including gopass secrets.
 
 ```
-load-env myconfig kopia <params>
+
+load-env myconfig kopia [kopia-params]
+
 ```
 
 - `load-env` looks for a `myconfig.env` file in current directory, or in `~/.config/load-env/myconfig.env`
 - reads `myconfig.env` file and loads `KEY=VALUE` pairs, e.g. `KOPIA_PASSWORD=$(gopass show test/KOPIA_PASSWORD)`
 - pass these resolved `KEY=VALUE` pairs to `kopia <params>`
 
+For layered configurations, you can chain multiple `.env` files. For example, `default.env` defines default settings, and `myconfig.env` overrides some variables in the default:
+
+```
+
+load-env default,myconfig kopia [kopia-params]
+
+```
+
 ## Features
 
+- **Chained Configuration**: Specify multiple `.env` files (e.g., `id1,id2,id3`). Variables from later files in the chain override those from earlier ones, enabling powerful layered configurations.
 - **Intelligent `.env` Parsing**: Reads `KEY=VALUE` pairs, gracefully skipping comments and empty lines.
 - **Smart Value Handling**: Supports both double-quoted values (with full escape sequence support like `\n`, `\"`) and literal single-quoted values.
 - **Robust Variable Expansion**: Resolve `$VAR` and `${VAR}` references within your `.env` file. It handles recursive expansions and prevents infinite loops from circular dependencies, resolving unresolvable variables to empty strings with a warning.
@@ -33,21 +44,22 @@ load-env myconfig kopia <params>
 
   - **View Variables**: Safely display the fully resolved environment variables before applying them, useful for debugging.
 
+- **Environment Sandboxing (`--sandboxed`)**: Control whether `load-env` passes inherited system environment variables to the target process. With `--sandboxed`, only variables explicitly defined in your `.env` files are passed, creating a clean, isolated environment.
 - **Portable & Minimal**: Built in Go, `load-env` compiles into a single, self-contained binary, ensuring easy distribution and minimal external dependencies.
 
 ## How Does It Work?
 
-`load-env` first locates your `.env` file, prioritizing the current directory before checking a central configuration directory (e.g., `~/.config/load-env/`). It then meticulously reads each line, parsing key-value pairs, handling quoted strings, and executing `gopass` commands to fetch secrets.
+`load-env` first locates your `.env` file(s) based on the provided IDs, prioritizing the current directory before checking a central configuration directory (e.g., `~/.config/load-env/`). When chaining multiple IDs (e.g., `base,dev`), files are processed in order, with later files overriding variables defined in earlier ones. It then meticulously reads each line, parsing key-value pairs, handling quoted strings, and executing `gopass` commands or other shell commands to fetch dynamic values.
 
-After the initial parsing, `load-env` performs an iterative variable expansion process, resolving all `$VAR` and `${VAR}` references within the loaded environment variables. Finally, based on your chosen mode:
+After the initial parsing and command substitutions, `load-env` performs an iterative variable expansion process, resolving all `$VAR` and `${VAR}` references within the loaded environment variables, handling nesting and detecting circularities. Finally, based on your chosen mode and the `--sandboxed` flag:
 
-- For running executables or launching subshells, `load-env` uses `syscall.Exec` to replace its own process with the target command, ensuring the environment is seamlessly passed.
+- For running executables or launching subshells, `load-env` uses `syscall.Exec` to replace its own process with the target command, ensuring the environment is seamlessly passed. The environment passed includes variables from `.env` files, optionally merged with the inherited system environment based on the `--sandboxed` flag.
 - For exporting variables, it prints shell-compatible `export` commands to standard output.
 - For viewing, it simply prints the resolved variables to your terminal.
 
 ## Why `load-env`?
 
-While other tools exist for managing `.env` files, `load-env` aims to be a minimal, self-contained Go binary that's easy to distribute and use, especially in environments where installing Python or Node.js dependencies might be cumbersome. It provides built-in `gopass` integration for those who manage secrets with it, and clear modes of operation for various workflows.
+While other tools exist for managing `.env` files, `load-env` aims to be a minimal, self-contained Go binary that's easy to distribute and use, especially in environments where installing Python or Node.js dependencies might be cumbersome. It provides built-in `gopass` integration for those who manage secrets with it, and clear modes of operation for various workflows. Its ability to chain multiple `.env` files and offer sandboxed execution provides powerful flexibility for complex configurations.
 
 ---
 
@@ -56,7 +68,7 @@ While other tools exist for managing `.env` files, `load-env` aims to be a minim
 You can build `load-env` from source:
 
 ```bash
-git clone https://github.com/revivalstack/load-env.git
+git clone [https://github.com/revivalstack/load-env.git](https://github.com/revivalstack/load-env.git)
 cd load-env
 go build -o load-env .
 sudo mv load-env /usr/local/bin/
@@ -65,7 +77,7 @@ sudo mv load-env /usr/local/bin/
 or via
 
 ```
-go install github.com/revivalstack/load-env@latest
+go install [github.com/revivalstack/load-env@latest](https://github.com/revivalstack/load-env@latest)
 ```
 
 ## Usage
@@ -84,6 +96,14 @@ DB_PASS=$(gopass show myproject/database/password) # Fetches password from gopas
 API_KEY="supersecret_key_with_\"quotes\""
 APP_URL=http://$DB_HOST:$DB_PORT/app
 MESSAGE='This is a literal string with $ and \' characters.'
+```
+
+### Chaining .env Files
+
+To load `base.env` then `dev.env`, with `dev.env` overriding variables from `base.env`:
+
+```Bash
+load-env base,dev myapp-script.sh
 ```
 
 ### Running an Executable
@@ -107,7 +127,7 @@ load-env myproject
 To load variables for `myproject` into your current shell session (variables will persist):
 
 ```Bash
-eval "$(load-env --export myproject)"
+eval "$(load-env myproject --export)"
 ```
 
 **Warning**: Variables exported this way are visible in your shell's environment (`env`, `ps e`) and can persist across commands. Use with caution for sensitive data.
@@ -117,10 +137,19 @@ eval "$(load-env --export myproject)"
 To see the resolved environment variables for `myproject` without running any commands:
 
 ```Bash
-load-env --view myproject
+load-env myproject --view
 ```
 
 **Warning**: This will print plaintext secrets (if any are resolved from `gopass`) to your terminal.
+
+### Sandboxed Execution
+
+To run a command with _only_ the environment variables defined in `myproject.env`, ignoring inherited system environment variables (unless overridden):
+
+```Bash
+load-env myproject --sandboxed bash -c 'echo "PATH: $PATH, MY_VAR: $MY_VAR"'
+# MY_VAR will be whatever is in myproject.env, PATH will likely be empty if not explicitly set there.
+```
 
 ### Version and Help
 
