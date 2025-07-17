@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	version = "0.4.0" // Current version of the tool
+	version = "0.5.0"
 
 	// DefaultConfigDir defines the default centralized directory for .env files.
 	// It's relative to the user's home directory (e.g., ~/.config/load-env).
@@ -24,6 +24,9 @@ const (
 	// defaultShell is the shell to launch when `load-env <id>` is called
 	// without a specified executable.
 	defaultShell = "bash"
+
+	// A unique string unlikely to appear in values
+	literalDollarPlaceholder = "__LOAD_ENV_LITERAL_DOLLAR__"
 )
 
 // commandExecutor is a type that represents a function capable of executing a command.
@@ -36,11 +39,59 @@ var defaultCommandExecutor commandExecutor = exec.Command
 
 // gopassRegex identifies `$(gopass show <path>)` patterns for specific handling.
 // It captures the path as the first group.
-var gopassRegex = regexp.MustCompile(`^\$\(gopass\ show\ (.*)\)$`)
+var gopassRegex = regexp.MustCompile(`\$\(gopass(?: show)?(?:(?:\s+[-]{1,2}[a-zA-Z0-9_]+(?:[^)\s]+)?)*)\s*([^)]+)\)`)
+
+// alternateCommandRegex identifies any `$[command args...]` pattern.
+// It captures the entire command string inside the brackets as the first group.
+var alternateCommandRegex = regexp.MustCompile(`\$\[([^\]]+)\]`)
 
 // genericCommandRegex identifies any `$(command args...)` pattern.
 // It captures the entire command string inside the parentheses as the first group.
-var genericCommandRegex = regexp.MustCompile(`^\$\((.+)\)$`)
+var genericCommandRegex = regexp.MustCompile(`\$\(([^)]+)\)`)
+
+// variableExpansionRegex is a regular expression to find occurrences of
+// `$VAR` or `${VAR}` patterns within a string.
+// Group 1 captures the variable name for `$VAR` (e.g., `VAR_NAME`).
+// Group 2 captures the variable name for `${VAR}` (e.g., `VAR_NAME`).
+var variableExpansionRegex = regexp.MustCompile(`\$(?:([a-zA-Z_][a-zA-Z0-9_]*)|{([a-zA-Z_][a-zA-Z0-9_]*)})`)
+
+// applyCommandSubstitution replaces command substitution patterns (e.g., $(...) or $[...])
+// in the given value string using the provided regex.
+func applyCommandSubstitution(
+	value string,
+	r *regexp.Regexp, // The regex to use (genericCommandRegex or alternateCommandRegex)
+	key string,
+	envFilePath string,
+	lineNum int,
+	cmdExecutor commandExecutor,
+	inheritedEnvMap map[string]string,
+	initialEnvMap map[string]string,
+	combinedEnvForLookup map[string]string,
+) string {
+	return r.ReplaceAllStringFunc(value, func(matchStr string) string {
+		matches := r.FindStringSubmatch(matchStr)
+		if len(matches) < 2 || matches[1] == "" { // Should not happen if regex matched correctly and captured
+			fmt.Fprintf(os.Stderr, " » load-env: Warning: Command substitution regex matched but failed to extract command for variable '%s' on line %d in '%s'. Match: '%s'.\n", key, lineNum, envFilePath, matchStr)
+			return matchStr // Return original match if command extraction fails
+		}
+		commandToExecute := matches[1]
+
+		output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor, inheritedEnvMap, initialEnvMap)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, " » load-env: Warning: %v. Value set to empty.\n", err)
+			return ""
+		}
+
+		// Crucially: Expand variables *within the command's output*
+		// This is a recursive call to expandVarsInString
+		output = expandVarsInString(output, combinedEnvForLookup)
+
+		if output == "" {
+			fmt.Fprintf(os.Stderr, " » load-env: Warning: command '%s' for variable '%s' returned an empty value on line %d in '%s'.\n", commandToExecute, key, lineNum, envFilePath)
+		}
+		return output
+	})
+}
 
 // executeCommandSubstitution runs a command string using the default shell
 // and returns its standard output.
@@ -72,9 +123,9 @@ func executeCommandSubstitution(key, commandString, envFilePath string, lineNum 
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			// Include stderr output from the failed command in the error message
-			return "", fmt.Errorf("command '%s' for variable '%s' on line %d in '%s' failed with exit code %d: %s", commandString, key, lineNum, envFilePath, exitErr.ExitCode(), string(exitErr.Stderr))
+			return "", fmt.Errorf(" » command '%s' for variable '%s' on line %d in '%s' failed with exit code %d: %s", commandString, key, lineNum, envFilePath, exitErr.ExitCode(), string(exitErr.Stderr))
 		}
-		return "", fmt.Errorf("failed to execute command substitution for variable '%s' on line %d in '%s': %w", key, lineNum, envFilePath, err)
+		return "", fmt.Errorf(" » failed to execute command substitution for variable '%s' on line %d in '%s': %w", key, lineNum, envFilePath, err)
 	}
 	return strings.TrimSuffix(string(output), "\n"), nil
 }
@@ -93,7 +144,9 @@ Description:
   Files are processed in order, with later files overriding variables from earlier ones.
   load-env looks for <id>.env in the current directory, or if not found,
   from ~/.config/load-env/<id>.env (or the path in LOAD_ENV_CONFIG_DIR).
-  Supports variable expansion (e.g., FOO=$BAR or FOO=${BAR}) and command substitution (e.g. $(gopass show ...)).
+  Supports variable expansion (e.g., FOO=$BAR or FOO=${BAR}) and command substitution.
+  For command substitution, both $(...) and $[...] syntaxes are available.
+  The $[...] syntax is recommended for commands that include parentheses or backticks.
 
 Options:
   --sandboxed       If set, the executed command will receive an environment
@@ -130,8 +183,11 @@ Environment File Format:
   (Looked for in current directory first, then in ~/.config/load-env/)
   KEY=VALUE
   # Comments are supported
-  DB_PASS=$(gopass show myproject/database/password) # Gopass specific example
-  AWS_REGION=$(aws configure get region)             # Generic command example
+  DB_PASS=$(gopass show myproject/database/password) # Special command substitution: supports 'gopass show <path>' or 'gopass <path>'
+  MY_SECRET=$(some_simple_cmd)                       # Generic command substitution with $() syntax (use with caution for complex commands)
+  API_KEY=$[retrieve-api-key.sh --key=abc]           # Robust command substitution using $[] syntax (recommended for complexity)
+  # Example of $[] handling internal parentheses/backticks:
+  # COMPLEX_CMD=$[echo "Current time is $(date) (GMT)"]
   APP_PORT=8080
   API_URL=http://localhost:$APP_PORT # Variable expansion example
   SECRET_MESSAGE="Hello \"world\""   # Double-quoted value with inner escapes
@@ -141,6 +197,25 @@ Environment File Format:
 	os.Exit(1)
 }
 
+// expandVarsInString performs variable expansion on a given string using the provided environment map.
+// It replaces `$VAR` or `${VAR}` patterns with their values.
+func expandVarsInString(text string, combinedEnvForLookup map[string]string) string {
+	return variableExpansionRegex.ReplaceAllStringFunc(text, func(matchStr string) string {
+		varName := ""
+		matches := variableExpansionRegex.FindStringSubmatch(matchStr)
+		if len(matches) > 1 && matches[1] != "" { // $VAR format (group 1)
+			varName = matches[1]
+		} else if len(matches) > 2 && matches[2] != "" { // ${VAR} format (group 2)
+			varName = matches[2]
+		}
+		if val, ok := combinedEnvForLookup[varName]; ok {
+			return val
+		}
+		// If variable is not found, expand to an empty string (standard behavior)
+		return ""
+	})
+}
+
 // parseEnvFile reads the .env file at the given path, processes each line
 // for key-value pairs, handles command substitutions, unquotes values,
 // and finally performs variable expansion. It returns a map of the fully
@@ -148,11 +223,11 @@ Environment File Format:
 func parseEnvFile(envFilePath string, cmdExecutor commandExecutor, inheritedEnvMap map[string]string) (map[string]string, error) {
 	file, err := os.Open(envFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("could not open .env file '%s': %w", envFilePath, err)
+		return nil, fmt.Errorf(" » could not open .env file '%s': %w", envFilePath, err)
 	}
 	defer file.Close() // Ensure the file is closed when the function exits.
 
-	initialEnvMap := make(map[string]string) // Stores parsed values before variable expansion.
+	initialEnvMap := make(map[string]string) // Stores only fully resolved values.
 	scanner := bufio.NewScanner(file)
 	lineNum := 0
 
@@ -170,12 +245,13 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor, inheritedEnvM
 		if len(parts) != 2 {
 			// If a line doesn't contain an '=', it's considered malformed.
 			// Print a warning to stderr and skip this line.
-			fmt.Fprintf(os.Stderr, "load-env: Warning: Skipping malformed line %d in '%s': '%s'. Expected 'KEY=VALUE' format.\n", lineNum, envFilePath, line)
+			fmt.Fprintf(os.Stderr, " » load-env: Warning: Skipping malformed line %d in '%s': '%s'. Expected 'KEY=VALUE' format.\n", lineNum, envFilePath, line)
 			continue
 		}
 
-		key := strings.TrimSpace(parts[0]) // Key is always trimmed.
-		value := parts[1]                  // Value might contain quotes or leading/trailing spaces.
+		// Ensure no leading or trailing spaces
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
 
 		// Handle quoted values:
 		// Double-quoted strings support escape sequences (processed by strconv.Unquote).
@@ -186,7 +262,7 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor, inheritedEnvM
 			} else {
 				// If unquoting fails (e.g., malformed escape, unclosed quote),
 				// log a warning and fall back to simply stripping the outer quotes.
-				fmt.Fprintf(os.Stderr, "load-env: Warning: Could not fully unquote value '%s' on line %d in '%s'. Error: %v. Using value after simple outer quote stripping.\n", value, lineNum, envFilePath, err)
+				fmt.Fprintf(os.Stderr, " » load-env: Warning: Could not fully unquote value '%s' on line %d in '%s'. Error: %v. Using value after simple outer quote stripping.\n", value, lineNum, envFilePath, err)
 				value = value[1 : len(value)-1] // Strip outer quotes manually.
 			}
 		} else if strings.HasPrefix(value, `'`) && strings.HasSuffix(value, `'`) && len(value) >= 2 {
@@ -195,177 +271,66 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor, inheritedEnvM
 			value = value[1 : len(value)-1]
 		}
 
-		// Handle literal dollar signs: Replace escaped "\$" with "$"
+		// Handle literal dollar signs: Replace escaped "\$" with literalDollarPlaceholder
 		// This must happen after unquoting, but before command and variable expansion,
 		// so that `\$` is not misinterpreted as a variable.
-		value = strings.ReplaceAll(value, `\$`, `$`)
+		value = strings.ReplaceAll(value, `\$`, literalDollarPlaceholder)
 
-		// Prepare the combined environment map for variable lookup during command substitution.
-		// This map combines inherited environment variables with those initially parsed
-		// from the .env file *so far*. Variables from the .env file will take precedence
-		// during lookup if their keys conflict with existing inherited variables.
-		//
-		// Variables parsed directly from the .env file (up to this point) override inherited variables for lookup.
-		// This ensures that an .env variable can refer to another .env variable,
-		// or override an existing inherited variable and then be referenced.
+		// Prepare the combined environment map for lookup during *this line's* processing.
+		// It includes inherited variables and variables from previously processed lines.
 		combinedEnvForLookup := mergeMaps(inheritedEnvMap, initialEnvMap)
 
-		// --- Process Command Substitution ---
-		// 1. Try to match the specific gopass pattern first.
-		if matches := gopassRegex.FindStringSubmatch(value); len(matches) > 1 {
-			gopassPath := matches[1] // Extract the gopass path from the regex match.
+		// --- Process Value: Aligned with logic.py's process_value function ---
+
+		// 1. Variable Expansion Pass
+		// This replaces `$VAR` or `${VAR}` with their values from combinedEnvForLookup.
+		value = expandVarsInString(value, combinedEnvForLookup)
+		// No inner loop needed here, as we established (initialEnvMap already has fully resolved values from prior lines)
+		// and this ReplaceAllStringFunc will resolve all immediate $VARs.
+
+		// 2. Gopass Command Substitution Pass
+		// Replaces `$(gopass show <path>)` with its output.
+		value = gopassRegex.ReplaceAllStringFunc(value, func(matchStr string) string {
+			matches := gopassRegex.FindStringSubmatch(matchStr)
+			if len(matches) < 2 { // Should not happen if regex matched
+				return matchStr // Return original if path not captured
+			}
+			gopassPath := matches[1]
 			commandToExecute := fmt.Sprintf("gopass show --password %s", gopassPath)
 
-			output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor, inheritedEnvMap, combinedEnvForLookup) // Pass the current environment map
+			output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor, inheritedEnvMap, initialEnvMap)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "load-env: Warning: %v.\n", err)
-				fmt.Fprintln(os.Stderr, "  This usually means the gopass secret does not exist or gopass encountered an error. Value set to empty.")
-				value = ""
-			} else {
-				value = output
-				if value == "" {
-					fmt.Fprintf(os.Stderr, "load-env: Warning: gopass command for variable '%s' (path: '%s') returned an empty value on line %d in '%s'.\n", key, gopassPath, lineNum, envFilePath)
-				}
+				fmt.Fprintf(os.Stderr, " » load-env: Warning: %v.\n", err)
+				fmt.Fprintln(os.Stderr, " » This usually means the gopass secret does not exist or gopass encountered an error. Value set to empty.")
+				return ""
 			}
-		} else if matches := genericCommandRegex.FindStringSubmatch(value); len(matches) > 1 {
-			// 2. If not gopass, try the generic command substitution pattern.
-			commandToExecute := matches[1] // The entire command captured by the generic regex.
 
-			output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor, inheritedEnvMap, combinedEnvForLookup) // Pass the current environment map
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "load-env: Warning: %v. Value set to empty.\n", err)
-				value = ""
-			} else {
-				value = output
-				if value == "" {
-					fmt.Fprintf(os.Stderr, "load-env: Warning: command '%s' for variable '%s' returned an empty value on line %d in '%s'.\n", commandToExecute, key, lineNum, envFilePath)
-				}
+			// Crucially: Expand variables *within the command's output*
+			output = expandVarsInString(output, combinedEnvForLookup)
+
+			if output == "" {
+				fmt.Fprintf(os.Stderr, " » load-env: Warning: gopass command for variable '%s' (path: '%s') returned an empty value on line %d in '%s'.\n", key, gopassPath, lineNum, envFilePath)
 			}
-		}
+			return output
+		})
 
-		// Store the processed key-value pair in the initial map.
+		// 3. Generic Command Substitution Pass
+		// Replaces `$[command args...]` with its output.
+		value = applyCommandSubstitution(value, alternateCommandRegex, key, envFilePath, lineNum, cmdExecutor, inheritedEnvMap, initialEnvMap, combinedEnvForLookup)
+		// Replaces `$(command args...)` with its output.
+		value = applyCommandSubstitution(value, genericCommandRegex, key, envFilePath, lineNum, cmdExecutor, inheritedEnvMap, initialEnvMap, combinedEnvForLookup)
+
+		// Store the fully processed (expanded and substituted) key-value pair.
+		// initialEnvMap now directly holds the resolved values.
 		initialEnvMap[key] = value
 	}
 
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error reading .env file '%s': %w", envFilePath, err)
+		return nil, fmt.Errorf(" » error reading .env file '%s': %w", envFilePath, err)
 	}
 
-	// Prepare the combined environment map for variable lookup during expansion.
-	// This map combines inherited environment variables with those initially parsed
-	// from the .env file. Variables from the .env file will take precedence
-	// during lookup if their keys conflict with existing inherited variables.
-	// This map is regenerated here to ensure it includes *all* initialEnvMap entries
-	// after command substitutions are processed for the entire file.
-	//
-	// Variables parsed directly from the .env file override inherited variables for lookup.
-	// This ensures that an .env variable can refer to another .env variable,
-	// or override an existing inherited variable and then be referenced.
-	combinedEnvForLookup := mergeMaps(inheritedEnvMap, initialEnvMap)
-
-	// Perform iterative variable expansion on the variables *that came from the .env file*.
-	// Use the `combinedEnvForLookup` map for resolving any references.
-	// This will contain only the keys that are in the current env file.
-	resolvedEnvMap := expandVariables(initialEnvMap, combinedEnvForLookup)
-
-	return resolvedEnvMap, nil
-}
-
-// variableExpansionRegex is a regular expression to find occurrences of
-// `$VAR` or `${VAR}` patterns within a string.
-// Group 1 captures the variable name for `$VAR` (e.g., `VAR_NAME`).
-// Group 2 captures the variable name for `${VAR}` (e.g., `VAR_NAME`).
-var variableExpansionRegex = regexp.MustCompile(`\$(?:([a-zA-Z_][a-zA-Z0-9_]*)|{([a-zA-Z_][a-zA-Z0-9_]*)})`)
-
-// expandVariables performs iterative variable expansion on values within the provided map.
-// It resolves references like `$VAR` or `${VAR}` using other variables defined
-// within the same map. It includes safeguards against infinite loops from
-// circular dependencies and ensures unresolvable variables are set to empty strings.
-func expandVariables(varsToExpand map[string]string, baseEnv map[string]string) map[string]string {
-	// Create a copy of varsToExpand to work on; we'll modify its values.
-	expandedVars := make(map[string]string, len(varsToExpand))
-	for k, v := range varsToExpand {
-		expandedVars[k] = v
-	}
-
-	// currentLookupEnv will be used for looking up variable values during expansion.
-	// It starts with the baseEnv (current shell + .env's initial values)
-	// and gets updated with `expandedVars` as they resolve.
-	currentLookupEnv := make(map[string]string, len(baseEnv)+len(expandedVars))
-	for k, v := range baseEnv {
-		currentLookupEnv[k] = v
-	}
-	// Initially, .env vars (even if not yet fully expanded) take precedence for lookup
-	// within the combined environment.
-	for k, v := range expandedVars {
-		currentLookupEnv[k] = v
-	}
-
-	maxIterations := 10 // Maximum iterations to attempt expansion; guards against circular deps.
-
-	for i := 0; i < maxIterations; i++ {
-		currentPassChanged := false // Flag to track if any variable was expanded in the current pass.
-
-		// Before each pass, ensure `currentLookupEnv` reflects the latest
-		// state of `expandedVars` for accurate lookups.
-		for k, v := range expandedVars {
-			currentLookupEnv[k] = v
-		}
-
-		for k, v := range expandedVars { // Iterate through the variables we are expanding
-			// Replace all found variable patterns in the current value `v`.
-			newValue := variableExpansionRegex.ReplaceAllStringFunc(v, func(match string) string {
-				varName := ""
-				matches := variableExpansionRegex.FindStringSubmatch(match)
-
-				// Determine which capture group holds the actual variable name.
-				if len(matches) > 1 && matches[1] != "" {
-					varName = matches[1] // Matched $VAR format.
-				} else if len(matches) > 2 && matches[2] != "" {
-					varName = matches[2] // Matched ${VAR} format.
-				}
-
-				// Look up the variable name in our combined lookup environment.
-				if val, ok := currentLookupEnv[varName]; ok { // KEY CHANGE: Lookup in currentLookupEnv
-					return val // Replace the pattern with its resolved value.
-				}
-				// If the referenced variable is not found, it expands to an empty string.
-				return ""
-			})
-
-			// If the variable's value changed after this pass of expansion,
-			// update the map and mark that a change occurred.
-			if newValue != v {
-				expandedVars[k] = newValue
-				currentPassChanged = true
-			}
-		}
-
-		// If no variables were changed in this entire pass, it means all possible
-		// expansions have occurred, and the map has stabilized. We can break early.
-		if !currentPassChanged {
-			break
-		}
-	}
-
-	// Post-expansion cleanup for unresolvable variables (e.g., true circular dependencies).
-	// After all iterations, if any variable still contains an expansion pattern,
-	// it means it could not be resolved (e.g., `A=$B` and `B=$A`).
-	// In such cases, set the variable to an empty string and issue a warning.
-	unresolvedDetected := false
-	for k, v := range expandedVars {
-		if variableExpansionRegex.MatchString(v) {
-			expandedVars[k] = "" // Resolve the unresolvable variable to an empty string.
-			unresolvedDetected = true
-		}
-	}
-
-	// If any unresolvable variables were detected and cleaned up, issue a warning.
-	if unresolvedDetected {
-		fmt.Fprintf(os.Stderr, "load-env: Warning: Variable expansion did not fully resolve after iterations. Possible circular dependencies or unresolvable variables. Remaining references resolved to empty strings.\n")
-	}
-
-	return expandedVars
+	// At this point, initialEnvMap contains all fully resolved values from the .env file.
+	return initialEnvMap, nil
 }
 
 // mapToSlice converts a map[string]string to a slice of strings in "KEY=VALUE" format.
@@ -422,28 +387,37 @@ func main() {
 			usage() // Print usage and exit.
 		case "--view":
 			viewMode = true
-			args = []string{args[1]}
+			if len(args) > 1 { // If ID is provided after --view
+				args = []string{args[1]}
+			} else { // If only --view is provided without ID
+				usage() // ID is mandatory
+			}
 		case "--export":
 			exportMode = true
-			args = []string{args[1]}
+			if len(args) > 1 { // If ID is provided after --export
+				args = []string{args[1]}
+			} else { // If only --export is provided without ID
+				usage() // ID is mandatory
+			}
 		case "--sandboxed":
 			sandBoxed = true
 			args = args[1:]
 		default:
+			// Handle cases where flags might appear after the ID (e.g., load-env myid --view)
 			if len(args) > 1 {
 				switch args[1] {
 				case "--view":
 					viewMode = true
-					args = []string{args[0]}
+					args = []string{args[0]} // Keep only the ID
 				case "--export":
 					exportMode = true
-					args = []string{args[0]}
+					args = []string{args[0]} // Keep only the ID
 				case "--sandboxed":
 					sandBoxed = true
-					if len(args) > 2 {
-						args = append(args[:1], args[2:]...)
-					} else {
-						args = args[:1]
+					if len(args) > 2 { // load-env ID --sandboxed executable args
+						args = append(args[:1], args[2:]...) // Remove --sandboxed, keep ID and subsequent args
+					} else { // load-env ID --sandboxed
+						args = args[:1] // Keep only ID
 					}
 				}
 			}
@@ -465,7 +439,7 @@ func main() {
 	// Split the comma-delimited IDs
 	envIDs := strings.Split(idsStr, ",")
 	if len(envIDs) == 0 || (len(envIDs) == 1 && strings.TrimSpace(envIDs[0]) == "") {
-		fmt.Fprintln(os.Stderr, "Error: No .env file IDs provided.")
+		fmt.Fprintln(os.Stderr, " » Error: No .env file IDs provided.")
 		os.Exit(1)
 	}
 
@@ -489,7 +463,7 @@ func main() {
 			if configDir == "" {
 				homeDir, err := os.UserHomeDir()
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "load-env: Error: Could not determine user home directory: %v\n", err)
+					fmt.Fprintf(os.Stderr, " » load-env: Error: Could not determine user home directory: %v\n", err)
 					os.Exit(1)
 				}
 				configDir = filepath.Join(homeDir, DefaultConfigDir)
@@ -498,15 +472,15 @@ func main() {
 
 			// Check if the file exists in the configured directory.
 			if _, err := os.Stat(envFilePath); os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, "load-env: Error: Environment file '%s' not found in current directory or '%s'.\n", localEnvFileName, configDir)
+				fmt.Fprintf(os.Stderr, " » load-env: Error: Environment file '%s' not found in current directory or '%s'.\n", localEnvFileName, configDir)
 				os.Exit(1)
 			} else if err != nil {
-				fmt.Fprintf(os.Stderr, "load-env: Error: Could not access environment file '%s': %v\n", envFilePath, err)
+				fmt.Fprintf(os.Stderr, " » load-env: Error: Could not access environment file '%s': %v\n", envFilePath, err)
 				os.Exit(1)
 			}
 		} else {
 			// An error other than "not exist" occurred when checking the current directory.
-			fmt.Fprintf(os.Stderr, "load-env: Error: Could not access environment file '%s' in current directory: %v\n", localEnvFileName, err)
+			fmt.Fprintf(os.Stderr, " » load-env: Error: Could not access environment file '%s' in current directory: %v\n", localEnvFileName, err)
 			os.Exit(1)
 		}
 		envFilePaths = append(envFilePaths, envFilePath)
@@ -529,13 +503,21 @@ func main() {
 		// `parseEnvFile` returns a `map[string]string` containing the fully resolved variables.
 		resolvedEnvMap, err := parseEnvFile(envFilePath, defaultCommandExecutor, inheritedEnvMap)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "load-env: Error parsing .env file: %v\n", err)
+			fmt.Fprintf(os.Stderr, " » load-env: Error parsing .env file: %v\n", err)
 			os.Exit(1)
 		}
+		// Merge the resolved variables from the current .env file into the joint map.
+		// Later files override earlier ones.
 		jointResolvedEnvMap = mergeMaps(jointResolvedEnvMap, resolvedEnvMap)
 
-		// ready this for the next .env file
+		// For processing the *next* .env file in the chain, the `inheritedEnvMap`
+		// should be the combination of `osEnvMap` and all files processed so far.
 		inheritedEnvMap = mergeMaps(osEnvMap, jointResolvedEnvMap)
+	}
+
+	// Final pass to replace the placeholder for literal dollar signs ($) that were escaped.
+	for k, v := range jointResolvedEnvMap {
+		jointResolvedEnvMap[k] = strings.ReplaceAll(v, literalDollarPlaceholder, `$`)
 	}
 
 	// Convert the resolved map back to a slice of "KEY=VALUE" strings.
@@ -578,7 +560,7 @@ func main() {
 			// Mode 1: Run a specific executable.
 			targetCmd = executable
 			if strings.HasPrefix(targetCmd, "-") {
-				fmt.Fprintf(os.Stderr, "load-env: Invalid option: %s\n", targetCmd)
+				fmt.Fprintf(os.Stderr, " » load-env: Invalid option: %s\n", targetCmd)
 				os.Exit(1)
 			}
 		} else {
@@ -587,14 +569,14 @@ func main() {
 			if targetCmd == "" {
 				targetCmd = defaultShell // Fallback to 'bash'.
 			}
-			fmt.Fprintf(os.Stderr, "load-env: Launching new '%s' subshell with environment for '%s'...\n", targetCmd, idsStr)
+			fmt.Fprintf(os.Stderr, " » load-env: Launching new '%s' subshell with environment for '%s'...\n", targetCmd, idsStr)
 			execArgs = []string{targetCmd, "-i"} // `-i` makes the shell interactive.
 		}
 
 		// Attempt to find the absolute path of the target command in the system's PATH.
 		absTargetCmd, err := exec.LookPath(targetCmd)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "load-env: Error: Executable '%s' not found in PATH: %v\n", targetCmd, err)
+			fmt.Fprintf(os.Stderr, " » load-env: Error: Executable '%s' not found in PATH: %v\n", targetCmd, err)
 			os.Exit(1)
 		}
 
@@ -625,7 +607,7 @@ func main() {
 		// If `syscall.Exec` returns, it means it failed to execute the command.
 		err = syscall.Exec(absTargetCmd, finalArgs, envp)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "load-env: Error executing '%s': %v\n", absTargetCmd, err)
+			fmt.Fprintf(os.Stderr, " » load-env: Error executing '%s': %v\n", absTargetCmd, err)
 			os.Exit(1)
 		}
 		// Code after `syscall.Exec` will only run if `syscall.Exec` failed.

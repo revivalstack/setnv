@@ -8,10 +8,8 @@ Manage your application's environment variables with simplicity and power. `load
 
 Store your kopia environment variables in a `myconfig.env` file, and use `load-env` to call kopia with the resolved environment variables including gopass secrets.
 
-```
-
+```bash
 load-env myconfig kopia [kopia-params]
-
 ```
 
 - `load-env` looks for a `myconfig.env` file in current directory, or in `~/.config/load-env/myconfig.env`
@@ -20,10 +18,8 @@ load-env myconfig kopia [kopia-params]
 
 For layered configurations, you can chain multiple `.env` files. For example, `default.env` defines default settings, and `myconfig.env` overrides some variables in the default:
 
-```
-
+```bash
 load-env default,myconfig kopia [kopia-params]
-
 ```
 
 ## Features
@@ -32,8 +28,13 @@ load-env default,myconfig kopia [kopia-params]
 - **Intelligent `.env` Parsing**: Reads `KEY=VALUE` pairs, gracefully skipping comments and empty lines.
 - **Smart Value Handling**: Supports both double-quoted values (with full escape sequence support like `\n`, `\"`) and literal single-quoted values.
 - **Robust Variable Expansion**: Resolve `$VAR` and `${VAR}` references within your `.env` file. It handles recursive expansions and prevents infinite loops from circular dependencies, resolving unresolvable variables to empty strings with a warning.
-- **Seamless Gopass Integration**: Directly inject secrets from your `gopass` store using `$(gopass show <path>)` syntax, keeping sensitive data out of plain text.
-- **Command Substitution**: Execute shell commands and use their standard output as variable values using `$(command args)`. This works for any command, e.g. `MY_VAR=$(echo "hello")`, `DB_PASS=$(gopass show my/db/pass)`.
+- **Seamless Gopass Integration**: Directly inject secrets from your `gopass` store using `$(gopass show <path>)` or `$(gopass <path>)` syntax. This is a **specially handled command substitution** for convenient secret retrieval, keeping sensitive data out of plain text.
+- **Command Substitution**: Dynamically set variable values by executing shell commands and capturing their standard output. `load-env` supports two main syntaxes for general command execution:
+
+  - `$(command args)`: The traditional shell command substitution syntax, e.g., `MY_VAR=$(echo "hello")`. While supported, this syntax has **limitations with complex nested shell syntax** (e.g., unquoted parentheses or backticks) within the command string.
+
+  - `$[command args]`: **Recommended for robust command execution**, especially when your commands include internal parentheses, backticks, or other complex shell constructs. Example: `APP_VERSION=$[git describe --tags --abbrev=0]` or `COMPLEX_CMD=$[echo "Current time is $(date) (GMT)"]`.
+
 - **Flexible Execution Modes**:
 
   - **Execute a Command**: Load variables and run a specified executable with its arguments, with the environment isolated to that process.
@@ -61,8 +62,6 @@ After the initial parsing and command substitutions, `load-env` performs an iter
 
 While other tools exist for managing `.env` files, `load-env` aims to be a minimal, self-contained Go binary that's easy to distribute and use, especially in environments where installing Python or Node.js dependencies might be cumbersome. It provides built-in `gopass` integration for those who manage secrets with it, and clear modes of operation for various workflows. Its ability to chain multiple `.env` files and offer sandboxed execution provides powerful flexibility for complex configurations.
 
----
-
 ## Installation
 
 You can build `load-env` from source:
@@ -76,7 +75,7 @@ sudo mv load-env /usr/local/bin/
 
 or via
 
-```
+```bash
 go install [github.com/revivalstack/load-env@latest](https://github.com/revivalstack/load-env@latest)
 ```
 
@@ -93,6 +92,7 @@ DB_HOST=localhost
 DB_PORT=5432
 DB_USER=admin
 DB_PASS=$(gopass show myproject/database/password) # Fetches password from gopass
+BUILD_ID=$[date +%Y%m%d%H%M%S]                      # Example of robust command substitution using $[]
 API_KEY="supersecret_key_with_\"quotes\""
 APP_URL=http://$DB_HOST:$DB_PORT/app
 MESSAGE='This is a literal string with $ and \' characters.'
@@ -102,7 +102,7 @@ MESSAGE='This is a literal string with $ and \' characters.'
 
 To load `base.env` then `dev.env`, with `dev.env` overriding variables from `base.env`:
 
-```Bash
+```bash
 load-env base,dev myapp-script.sh
 ```
 
@@ -110,7 +110,7 @@ load-env base,dev myapp-script.sh
 
 To load variables for `myproject` and then run a command:
 
-```Bash
+```bash
 load-env myproject node index.js --port 3000
 ```
 
@@ -118,7 +118,7 @@ load-env myproject node index.js --port 3000
 
 To load variables for `myproject` and launch a new interactive shell:
 
-```Bash
+```bash
 load-env myproject
 ```
 
@@ -126,7 +126,7 @@ load-env myproject
 
 To load variables for `myproject` into your current shell session (variables will persist):
 
-```Bash
+```bash
 eval "$(load-env myproject --export)"
 ```
 
@@ -136,7 +136,7 @@ eval "$(load-env myproject --export)"
 
 To see the resolved environment variables for `myproject` without running any commands:
 
-```Bash
+```bash
 load-env myproject --view
 ```
 
@@ -146,17 +146,47 @@ load-env myproject --view
 
 To run a command with _only_ the environment variables defined in `myproject.env`, ignoring inherited system environment variables (unless overridden):
 
-```Bash
+```bash
 load-env myproject --sandboxed bash -c 'echo "PATH: $PATH, MY_VAR: $MY_VAR"'
 # MY_VAR will be whatever is in myproject.env, PATH will likely be empty if not explicitly set there.
 ```
 
 ### Version and Help
 
-```Bash
+```bash
 load-env --version
 load-env --help
 ```
+
+---
+
+### Integration with Container Runtimes (Podman & Docker)
+
+Seamlessly inject `load-env`'s variables into your containers:
+
+1.  **Via `--env-file` (Podman or Docker):**
+    Use `load-env --view` with your shell's process substitution (`<()`) to stream resolved variables as an environment file to your container runtime. This is the most robust method for both Podman and Docker.
+
+    ```bash
+    # For Podman:
+    podman run --rm --env-file <(load-env base,dev --view) alpine env
+
+    # For Docker:
+    docker run --rm --env-file <(load-env base,dev --view) alpine env
+    ```
+
+    - _Note:_ Requires shells supporting process substitution (e.g., Bash, Zsh).
+    - _Security:_ Output (including secrets) is streamed, not printed to terminal, but the command remains visible in shell history and process lists.
+
+2.  **Via `--env-host` (Podman only):**
+    Have `load-env` directly execute the `podman run` command. Use `--env-host` flag if you want environment variables set by `load-env` (and other host variables) to be passed into the container.
+
+    ```bash
+    # load-env sets env for the 'podman' process, and '--env-host' passes them to 'alpine'
+    load-env base,dev podman run --rm --env-host alpine printenv
+    ```
+
+---
 
 ## Contributing
 
