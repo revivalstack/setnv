@@ -1,3 +1,9 @@
+## v0.5.0 (2025-07-17)
+
+### Feat
+
+- enhance variable expansion and command substitution
+
 ## v0.4.0 (2025-07-16)
 
 ### Feat
