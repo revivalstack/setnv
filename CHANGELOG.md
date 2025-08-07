@@ -1,3 +1,9 @@
+## v0.6.0 (2025-08-07)
+
+### Feat
+
+- rename load-env to setnv
+
 ## v0.5.0 (2025-07-17)
 
 ### Feat
