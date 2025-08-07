@@ -269,7 +269,7 @@ APP_CONFIG=Secret is: $APP_SECRET`,
 		{
 			name:        "Literal Dollar Signs (escaped with backslash)",
 			envContent:  `COST=\$100.00`, // Backslash to escape literal $
-			expectedMap: map[string]string{"COST": "__LOAD_ENV_LITERAL_DOLLAR__100.00"},
+			expectedMap: map[string]string{"COST": "__SETNV_LITERAL_DOLLAR__100.00"},
 		},
 		{
 			name:        "Variable references itself (should resolve to empty)",

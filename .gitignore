@@ -38,5 +38,7 @@ ehthumbs.db     # Windows
 # Ignore .archive folder
 .archive/
 
-# Ignore built binary
-load-env
+# Ignore dist directory and binary
+dist/
+setnv
+

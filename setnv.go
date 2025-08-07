@@ -14,19 +14,19 @@ import (
 )
 
 const (
-	version = "0.5.0"
+	version = "0.6.0"
 
 	// DefaultConfigDir defines the default centralized directory for .env files.
-	// It's relative to the user's home directory (e.g., ~/.config/load-env).
-	// This can be overridden by the LOAD_ENV_CONFIG_DIR environment variable.
-	DefaultConfigDir = ".config/load-env"
+	// It's relative to the user's home directory (e.g., ~/.config/setnv).
+	// This can be overridden by the SETNV_CONFIG_DIR environment variable.
+	DefaultConfigDir = ".config/setnv"
 
-	// defaultShell is the shell to launch when `load-env <id>` is called
+	// defaultShell is the shell to launch when `setnv <id>` is called
 	// without a specified executable.
 	defaultShell = "bash"
 
 	// A unique string unlikely to appear in values
-	literalDollarPlaceholder = "__LOAD_ENV_LITERAL_DOLLAR__"
+	literalDollarPlaceholder = "__SETNV_LITERAL_DOLLAR__"
 )
 
 // commandExecutor is a type that represents a function capable of executing a command.
@@ -71,14 +71,14 @@ func applyCommandSubstitution(
 	return r.ReplaceAllStringFunc(value, func(matchStr string) string {
 		matches := r.FindStringSubmatch(matchStr)
 		if len(matches) < 2 || matches[1] == "" { // Should not happen if regex matched correctly and captured
-			fmt.Fprintf(os.Stderr, " » load-env: Warning: Command substitution regex matched but failed to extract command for variable '%s' on line %d in '%s'. Match: '%s'.\n", key, lineNum, envFilePath, matchStr)
+			fmt.Fprintf(os.Stderr, " » setnv: Warning: Command substitution regex matched but failed to extract command for variable '%s' on line %d in '%s'. Match: '%s'.\n", key, lineNum, envFilePath, matchStr)
 			return matchStr // Return original match if command extraction fails
 		}
 		commandToExecute := matches[1]
 
 		output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor, inheritedEnvMap, initialEnvMap)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, " » load-env: Warning: %v. Value set to empty.\n", err)
+			fmt.Fprintf(os.Stderr, " » setnv: Warning: %v. Value set to empty.\n", err)
 			return ""
 		}
 
@@ -87,7 +87,7 @@ func applyCommandSubstitution(
 		output = expandVarsInString(output, combinedEnvForLookup)
 
 		if output == "" {
-			fmt.Fprintf(os.Stderr, " » load-env: Warning: command '%s' for variable '%s' returned an empty value on line %d in '%s'.\n", commandToExecute, key, lineNum, envFilePath)
+			fmt.Fprintf(os.Stderr, " » setnv: Warning: command '%s' for variable '%s' returned an empty value on line %d in '%s'.\n", commandToExecute, key, lineNum, envFilePath)
 		}
 		return output
 	})
@@ -95,10 +95,10 @@ func applyCommandSubstitution(
 
 // executeCommandSubstitution runs a command string using the default shell
 // and returns its standard output.
-// It also directs the command's standard error to load-env's standard error.
+// It also directs the command's standard error to setnv's standard error.
 func executeCommandSubstitution(key, commandString, envFilePath string, lineNum int, cmdExecutor commandExecutor, inheritedEnvMap map[string]string, currentEnvMap map[string]string) (string, error) {
 	cmd := cmdExecutor(defaultShell, "-c", commandString)
-	cmd.Stderr = os.Stderr // Direct command's stderr to `load-env`'s stderr for visibility.
+	cmd.Stderr = os.Stderr // Direct command's stderr to `setnv`'s stderr for visibility.
 
 	// Build the environment for the sub-command.
 	// `subCmdEnvMap` is the environment that the executed command (e.g., `bash -c ...`) will inherit.
@@ -133,17 +133,17 @@ func executeCommandSubstitution(key, commandString, envFilePath string, lineNum 
 // usage prints detailed usage information to stderr and exits the program
 // with a non-zero status, indicating an error or invalid invocation.
 func usage() {
-	fmt.Fprintf(os.Stderr, `Usage: load-env <id>[,<id2>,...] [<executable> [<args...>]]
-       load-env <id>[,<id2>,...] --view  (to display variables read from the file(s) and EXIT)
-       eval "$(load-env <id>[,<id2>,...] --export)" (to load environment into the current shell)
-       load-env --version    (to display version information)
-       load-env --help       (to display this help message)
+	fmt.Fprintf(os.Stderr, `Usage: setnv <id>[,<id2>,...] [<executable> [<args...>]]
+       setnv <id>[,<id2>,...] --view  (to display variables read from the file(s) and EXIT)
+       eval "$(setnv <id>[,<id2>,...] --export)" (to load environment into the current shell)
+       setnv --version    (to display version information)
+       setnv --help       (to display this help message)
 
 Description:
   Loads environment variables from one or more .env files, specified by comma-separated IDs.
   Files are processed in order, with later files overriding variables from earlier ones.
-  load-env looks for <id>.env in the current directory, or if not found,
-  from ~/.config/load-env/<id>.env (or the path in LOAD_ENV_CONFIG_DIR).
+  setnv looks for <id>.env in the current directory, or if not found,
+  from ~/.config/setnv/<id>.env (or the path in SETNV_CONFIG_DIR).
   Supports variable expansion (e.g., FOO=$BAR or FOO=${BAR}) and command substitution.
   For command substitution, both $(...) and $[...] syntaxes are available.
   The $[...] syntax is recommended for commands that include parentheses or backticks.
@@ -154,33 +154,33 @@ Options:
                     disregarding any inherited environment variables not
                     explicitly overridden. By default, inherited variables
                     are included and overridden by .env file definitions.
-                    Example: load-env myproject --sandboxed bash -c export
+                    Example: setnv myproject --sandboxed bash -c export
 
 Modes of Operation:
-  1. load-env <id>[,<id2>,...] <executable> [args...]
+  1. setnv <id>[,<id2>,...] <executable> [args...]
      Loads variables from the specified .env file(s), then runs <executable> with its arguments.
      Variables are isolated to the executable's process and do not persist.
-     Example: load-env common,dev -- go run main.go
+     Example: setnv common,dev -- go run main.go
 
-  2. load-env <id>[,<id2>,...]
+  2. setnv <id>[,<id2>,...]
      Loads variables from the specified .env file(s), then launches a new interactive subshell (default: %s).
      Variables are isolated to the subshell and do not persist after exiting it.
-     Example: load-env base,project_secrets
+     Example: setnv base,project_secrets
 
-  3. eval "$(load-env <id>[,<id2>,...] --export)"
+  3. eval "$(setnv <id>[,<id2>,...] --export)"
      Loads variables from the specified .env file(s) and prints 'export' commands to stdout.
      These commands must be evaluated in your CURRENT shell session (e.g., using 'eval').
      Variables WILL persist. Use with caution for sensitive data (visible via 'ps e').
-     Example: eval "$(load-env common,prod --export)"
+     Example: eval "$(setnv common,prod --export)"
 
-  4. load-env <id>[,<id2>,...] --view
+  4. setnv <id>[,<id2>,...] --view
      Displays the resolved variables (including secrets from command substitutions) that would be loaded.
      WARNING: This will print plaintext secrets to your terminal. Use with caution.
      This mode does NOT launch a shell or run an executable; it only displays.
-     Example: load-env local_dev_secrets --view
+     Example: setnv local_dev_secrets --view
 
 Environment File Format:
-  (Looked for in current directory first, then in ~/.config/load-env/)
+  (Looked for in current directory first, then in ~/.config/setnv/)
   KEY=VALUE
   # Comments are supported
   DB_PASS=$(gopass show myproject/database/password) # Special command substitution: supports 'gopass show <path>' or 'gopass <path>'
@@ -245,7 +245,7 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor, inheritedEnvM
 		if len(parts) != 2 {
 			// If a line doesn't contain an '=', it's considered malformed.
 			// Print a warning to stderr and skip this line.
-			fmt.Fprintf(os.Stderr, " » load-env: Warning: Skipping malformed line %d in '%s': '%s'. Expected 'KEY=VALUE' format.\n", lineNum, envFilePath, line)
+			fmt.Fprintf(os.Stderr, " » setnv: Warning: Skipping malformed line %d in '%s': '%s'. Expected 'KEY=VALUE' format.\n", lineNum, envFilePath, line)
 			continue
 		}
 
@@ -262,7 +262,7 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor, inheritedEnvM
 			} else {
 				// If unquoting fails (e.g., malformed escape, unclosed quote),
 				// log a warning and fall back to simply stripping the outer quotes.
-				fmt.Fprintf(os.Stderr, " » load-env: Warning: Could not fully unquote value '%s' on line %d in '%s'. Error: %v. Using value after simple outer quote stripping.\n", value, lineNum, envFilePath, err)
+				fmt.Fprintf(os.Stderr, " » setnv: Warning: Could not fully unquote value '%s' on line %d in '%s'. Error: %v. Using value after simple outer quote stripping.\n", value, lineNum, envFilePath, err)
 				value = value[1 : len(value)-1] // Strip outer quotes manually.
 			}
 		} else if strings.HasPrefix(value, `'`) && strings.HasSuffix(value, `'`) && len(value) >= 2 {
@@ -300,7 +300,7 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor, inheritedEnvM
 
 			output, err := executeCommandSubstitution(key, commandToExecute, envFilePath, lineNum, cmdExecutor, inheritedEnvMap, initialEnvMap)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, " » load-env: Warning: %v.\n", err)
+				fmt.Fprintf(os.Stderr, " » setnv: Warning: %v.\n", err)
 				fmt.Fprintln(os.Stderr, " » This usually means the gopass secret does not exist or gopass encountered an error. Value set to empty.")
 				return ""
 			}
@@ -309,7 +309,7 @@ func parseEnvFile(envFilePath string, cmdExecutor commandExecutor, inheritedEnvM
 			output = expandVarsInString(output, combinedEnvForLookup)
 
 			if output == "" {
-				fmt.Fprintf(os.Stderr, " » load-env: Warning: gopass command for variable '%s' (path: '%s') returned an empty value on line %d in '%s'.\n", key, gopassPath, lineNum, envFilePath)
+				fmt.Fprintf(os.Stderr, " » setnv: Warning: gopass command for variable '%s' (path: '%s') returned an empty value on line %d in '%s'.\n", key, gopassPath, lineNum, envFilePath)
 			}
 			return output
 		})
@@ -381,7 +381,7 @@ func main() {
 	if len(args) > 0 {
 		switch args[0] {
 		case "--version":
-			fmt.Printf("load-env version %s\n", version)
+			fmt.Printf("setnv version %s\n", version)
 			os.Exit(0) // Exit after printing version.
 		case "--help":
 			usage() // Print usage and exit.
@@ -403,7 +403,7 @@ func main() {
 			sandBoxed = true
 			args = args[1:]
 		default:
-			// Handle cases where flags might appear after the ID (e.g., load-env myid --view)
+			// Handle cases where flags might appear after the ID (e.g., setnv myid --view)
 			if len(args) > 1 {
 				switch args[1] {
 				case "--view":
@@ -414,9 +414,9 @@ func main() {
 					args = []string{args[0]} // Keep only the ID
 				case "--sandboxed":
 					sandBoxed = true
-					if len(args) > 2 { // load-env ID --sandboxed executable args
+					if len(args) > 2 { // setnv ID --sandboxed executable args
 						args = append(args[:1], args[2:]...) // Remove --sandboxed, keep ID and subsequent args
-					} else { // load-env ID --sandboxed
+					} else { // setnv ID --sandboxed
 						args = args[:1] // Keep only ID
 					}
 				}
@@ -459,11 +459,11 @@ func main() {
 			envFilePath = localEnvFileName
 		} else if os.IsNotExist(err) {
 			// 2. If not found in the current directory, then check the configured directory.
-			configDir := os.Getenv("LOAD_ENV_CONFIG_DIR")
+			configDir := os.Getenv("SETNV_CONFIG_DIR")
 			if configDir == "" {
 				homeDir, err := os.UserHomeDir()
 				if err != nil {
-					fmt.Fprintf(os.Stderr, " » load-env: Error: Could not determine user home directory: %v\n", err)
+					fmt.Fprintf(os.Stderr, " » setnv: Error: Could not determine user home directory: %v\n", err)
 					os.Exit(1)
 				}
 				configDir = filepath.Join(homeDir, DefaultConfigDir)
@@ -472,15 +472,15 @@ func main() {
 
 			// Check if the file exists in the configured directory.
 			if _, err := os.Stat(envFilePath); os.IsNotExist(err) {
-				fmt.Fprintf(os.Stderr, " » load-env: Error: Environment file '%s' not found in current directory or '%s'.\n", localEnvFileName, configDir)
+				fmt.Fprintf(os.Stderr, " » setnv: Error: Environment file '%s' not found in current directory or '%s'.\n", localEnvFileName, configDir)
 				os.Exit(1)
 			} else if err != nil {
-				fmt.Fprintf(os.Stderr, " » load-env: Error: Could not access environment file '%s': %v\n", envFilePath, err)
+				fmt.Fprintf(os.Stderr, " » setnv: Error: Could not access environment file '%s': %v\n", envFilePath, err)
 				os.Exit(1)
 			}
 		} else {
 			// An error other than "not exist" occurred when checking the current directory.
-			fmt.Fprintf(os.Stderr, " » load-env: Error: Could not access environment file '%s' in current directory: %v\n", localEnvFileName, err)
+			fmt.Fprintf(os.Stderr, " » setnv: Error: Could not access environment file '%s' in current directory: %v\n", localEnvFileName, err)
 			os.Exit(1)
 		}
 		envFilePaths = append(envFilePaths, envFilePath)
@@ -503,7 +503,7 @@ func main() {
 		// `parseEnvFile` returns a `map[string]string` containing the fully resolved variables.
 		resolvedEnvMap, err := parseEnvFile(envFilePath, defaultCommandExecutor, inheritedEnvMap)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, " » load-env: Error parsing .env file: %v\n", err)
+			fmt.Fprintf(os.Stderr, " » setnv: Error parsing .env file: %v\n", err)
 			os.Exit(1)
 		}
 		// Merge the resolved variables from the current .env file into the joint map.
@@ -540,7 +540,7 @@ func main() {
 		}
 		os.Exit(0) // Exit after displaying variables.
 	} else if exportMode {
-		// Mode 3: Load into current shell (via `eval "$(load-env --export <id>)"`).
+		// Mode 3: Load into current shell (via `eval "$(setnv --export <id>)"`).
 		for _, varPair := range jointResolvedEnvVars {
 			parts := strings.SplitN(varPair, "=", 2)
 			if len(parts) == 2 {
@@ -560,7 +560,7 @@ func main() {
 			// Mode 1: Run a specific executable.
 			targetCmd = executable
 			if strings.HasPrefix(targetCmd, "-") {
-				fmt.Fprintf(os.Stderr, " » load-env: Invalid option: %s\n", targetCmd)
+				fmt.Fprintf(os.Stderr, " » setnv: Invalid option: %s\n", targetCmd)
 				os.Exit(1)
 			}
 		} else {
@@ -569,14 +569,14 @@ func main() {
 			if targetCmd == "" {
 				targetCmd = defaultShell // Fallback to 'bash'.
 			}
-			fmt.Fprintf(os.Stderr, " » load-env: Launching new '%s' subshell with environment for '%s'...\n", targetCmd, idsStr)
+			fmt.Fprintf(os.Stderr, " » setnv: Launching new '%s' subshell with environment for '%s'...\n", targetCmd, idsStr)
 			execArgs = []string{targetCmd, "-i"} // `-i` makes the shell interactive.
 		}
 
 		// Attempt to find the absolute path of the target command in the system's PATH.
 		absTargetCmd, err := exec.LookPath(targetCmd)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, " » load-env: Error: Executable '%s' not found in PATH: %v\n", targetCmd, err)
+			fmt.Fprintf(os.Stderr, " » setnv: Error: Executable '%s' not found in PATH: %v\n", targetCmd, err)
 			os.Exit(1)
 		}
 
@@ -601,13 +601,13 @@ func main() {
 			envp = mapToSlice(fullSetEnvMap)
 		}
 
-		// Perform `syscall.Exec`. This replaces the current `load-env` Go process
+		// Perform `syscall.Exec`. This replaces the current `setnv` Go process
 		// with the target command, passing the merged environment and arguments.
 		// `syscall.Exec` is a low-level call, typically used for this purpose on Unix-like systems.
 		// If `syscall.Exec` returns, it means it failed to execute the command.
 		err = syscall.Exec(absTargetCmd, finalArgs, envp)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, " » load-env: Error executing '%s': %v\n", absTargetCmd, err)
+			fmt.Fprintf(os.Stderr, " » setnv: Error executing '%s': %v\n", absTargetCmd, err)
 			os.Exit(1)
 		}
 		// Code after `syscall.Exec` will only run if `syscall.Exec` failed.
